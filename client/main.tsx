@@ -7,6 +7,7 @@ import { connectVoice, type VoiceSession } from "./voice";
 import { startDemoRecorder, type DemoRecorder } from "./recorder";
 import "./styles.css";
 import { assessPixels } from "./quality";
+import { browserCaptureAccessIssue, mediaRequestError } from "./media-access";
 
 type Health = {
   openai_configured: boolean;
@@ -121,10 +122,20 @@ function Inventory({
           {!books.length ? (
             <div className="empty">
               <strong>
-                {filter ? "No books match this search" : sweep.status === "complete" || sweep.status === "failed" ? "No books detected in the saved evidence" : sweep.frames.length ? "Recognition is running" : "Your inventory will appear here"}
+                {filter
+                  ? "No books match this search"
+                  : sweep.status === "complete" || sweep.status === "failed"
+                    ? "No books detected in the saved evidence"
+                    : sweep.frames.length
+                      ? "Recognition is running"
+                      : "Your inventory will appear here"}
               </strong>
               <p>
-                {filter ? "Clear the search to see the full inventory." : sweep.status === "complete" || sweep.status === "failed" ? "Check the saved frames and review queue. A zero count is not proof that the room contains no books." : "Pan slowly across one labelled shelf at a time. Keep the full spines visible, including horizontal stacks."}
+                {filter
+                  ? "Clear the search to see the full inventory."
+                  : sweep.status === "complete" || sweep.status === "failed"
+                    ? "Check the saved frames and review queue. A zero count is not proof that the room contains no books."
+                    : "Pan slowly across one labelled shelf at a time. Keep the full spines visible, including horizontal stacks."}
               </p>
             </div>
           ) : (
@@ -555,6 +566,7 @@ function Evidence({
 }
 
 function App() {
+  const captureIssue = browserCaptureAccessIssue();
   const [health, setHealth] = useState<Health | null>(null);
   const [sessions, setSessions] = useState<SweepSummary[]>([]);
   const [sweep, setSweep] = useState<SweepState | null>(null);
@@ -599,7 +611,12 @@ function App() {
   const upload = useRef<Promise<void> | null>(null);
   const sequence = useRef(0);
   const lastVoiceImage = useRef(0);
-  const previousThumbnail = useRef<{ shelf: string; width: number; height: number; pixels: Uint8ClampedArray } | null>(null);
+  const previousThumbnail = useRef<{
+    shelf: string;
+    width: number;
+    height: number;
+    pixels: Uint8ClampedArray;
+  } | null>(null);
   const lastQualityCue = useRef(0);
   const [localCue, setLocalCue] = useState<string | null>(null);
   const live = useRef(false);
@@ -804,23 +821,25 @@ function App() {
     });
   }
   async function openMedia() {
-    if (!navigator.mediaDevices?.getUserMedia)
-      throw new Error(
-        "Camera access requires HTTPS or localhost. On a phone, use the HTTPS setup in the README.",
-      );
+    const issue = browserCaptureAccessIssue();
+    if (issue) throw new Error(issue.message);
     media.current?.getTracks().forEach((track) => track.stop());
-    media.current = await navigator.mediaDevices.getUserMedia({
-      video: {
-        facingMode: { ideal: "environment" },
-        width: { ideal: 1920 },
-        height: { ideal: 1080 },
-      },
-      audio: {
-        echoCancellation: true,
-        noiseSuppression: true,
-        autoGainControl: true,
-      },
-    });
+    try {
+      media.current = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1920 },
+          height: { ideal: 1080 },
+        },
+        audio: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+      });
+    } catch (error) {
+      throw new Error(mediaRequestError(error));
+    }
     setHasMedia(true);
     if (video.current) {
       video.current.srcObject = media.current;
@@ -933,21 +952,49 @@ function App() {
       const ctx = canvas.getContext("2d");
       if (!ctx) throw new Error("Camera frame could not be rendered.");
       ctx.drawImage(element, 0, 0, canvas.width, canvas.height);
-      const thumbnail = document.createElement('canvas');
+      const thumbnail = document.createElement("canvas");
       const thumbRatio = 160 / Math.max(canvas.width, canvas.height);
-      thumbnail.width = Math.max(3, Math.round(canvas.width * thumbRatio)); thumbnail.height = Math.max(3, Math.round(canvas.height * thumbRatio));
-      const thumbContext = thumbnail.getContext('2d', { willReadFrequently: true });
+      thumbnail.width = Math.max(3, Math.round(canvas.width * thumbRatio));
+      thumbnail.height = Math.max(3, Math.round(canvas.height * thumbRatio));
+      const thumbContext = thumbnail.getContext("2d", {
+        willReadFrequently: true,
+      });
       if (thumbContext) {
         thumbContext.drawImage(canvas, 0, 0, thumbnail.width, thumbnail.height);
-        const pixels = thumbContext.getImageData(0, 0, thumbnail.width, thumbnail.height).data;
+        const pixels = thumbContext.getImageData(
+          0,
+          0,
+          thumbnail.width,
+          thumbnail.height,
+        ).data;
         const before = previousThumbnail.current;
-        const sameView = before?.shelf === shelfRef.current && before.width === thumbnail.width && before.height === thumbnail.height;
-        const quality = assessPixels(pixels, thumbnail.width, thumbnail.height, sameView ? before.pixels : undefined);
-        previousThumbnail.current = { shelf: shelfRef.current, width: thumbnail.width, height: thumbnail.height, pixels };
+        const sameView =
+          before?.shelf === shelfRef.current &&
+          before.width === thumbnail.width &&
+          before.height === thumbnail.height;
+        const quality = assessPixels(
+          pixels,
+          thumbnail.width,
+          thumbnail.height,
+          sameView ? before.pixels : undefined,
+        );
+        previousThumbnail.current = {
+          shelf: shelfRef.current,
+          width: thumbnail.width,
+          height: thumbnail.height,
+          pixels,
+        };
         setLocalCue(quality.cue);
-        if (quality.cue && Date.now() - lastQualityCue.current > 12000 && /shelf|book|row/i.test(shelfRef.current)) {
+        if (
+          quality.cue &&
+          Date.now() - lastQualityCue.current > 12000 &&
+          /shelf|book|row/i.test(shelfRef.current)
+        ) {
           lastQualityCue.current = Date.now();
-          voice.current?.sayContext(`Local capture heuristic, not an OCR result: ${quality.cue}`, true);
+          voice.current?.sayContext(
+            `Local capture heuristic, not an OCR result: ${quality.cue}`,
+            true,
+          );
         }
       }
       const image = canvas.toDataURL("image/jpeg", 0.9);
@@ -1193,6 +1240,17 @@ function App() {
         </div>
       </header>
       <main>
+        {!hasMedia && captureIssue && (
+          <div className="error-stack" role="status">
+            <div>
+              <span>
+                <strong>Camera setup needed. </strong>
+                {captureIssue.message} Open this address directly in your
+                browser: <code>{window.location.origin}/</code>
+              </span>
+            </div>
+          </div>
+        )}
         {errors.length > 0 && (
           <div className="error-stack" role="alert">
             {errors.map((error, index) => (
@@ -1254,10 +1312,13 @@ function App() {
               <details>
                 <summary>Phone connection and browser requirements</summary>
                 <p>
-                  Open the HTTPS URL from the README on your phone. Camera and
-                  microphone work on HTTPS or localhost; a plain HTTP LAN
-                  address will not work. Allow camera, microphone, and audio
-                  playback. Keep this tab in the foreground.
+                  On this computer, open the app directly in Chrome or Safari.
+                  An embedded preview may not expose camera or microphone
+                  access, even at localhost. Open the HTTPS URL from the README
+                  on your phone. Camera and microphone work on HTTPS or
+                  localhost; a plain HTTP LAN address will not work. Allow
+                  camera, microphone, and audio playback. Keep this tab in the
+                  foreground.
                 </p>
               </details>
             </div>
@@ -1384,6 +1445,12 @@ function App() {
               <button className="primary large" disabled={!!busy || !health}>
                 {busy === "start" ? "Opening camera…" : "Start camera & sweep"}
               </button>
+              {!captureIssue && (
+                <p className="hint" role="status">
+                  This browser supports camera capture. Starting the sweep will
+                  request camera and microphone permission.
+                </p>
+              )}
               <button
                 type="button"
                 className="text-button"
@@ -1778,7 +1845,14 @@ function App() {
                 </div>
                 <div className="panel">
                   <h3>Capture guidance</h3>
-                {localCue && <p className="notice"><strong>Local frame cue:</strong> {localCue}<small>Fast pixel heuristic; does not assess title correctness.</small></p>}
+                  {localCue && (
+                    <p className="notice">
+                      <strong>Local frame cue:</strong> {localCue}
+                      <small>
+                        Fast pixel heuristic; does not assess title correctness.
+                      </small>
+                    </p>
+                  )}
                   {sweep.guidance.length ? (
                     <ul className="guidance-list">
                       {sweep.guidance

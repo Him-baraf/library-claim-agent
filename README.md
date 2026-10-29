@@ -16,9 +16,16 @@ npm run doctor
 npm run dev
 ```
 
-Open **http://localhost:5173** on this computer. Allow camera and microphone. If a model is unavailable to your project, change its environment variable and restart. Defaults: `gpt-6.1-terra` for image recognition `gpt-6.1-sol` for source discovery, and `gpt-realtime-2.1` for voice. See official [models](https://developers.openai.com/api/docs/models), [WebRTC](https://developers.openai.com/api/docs/guides/voice-webrtc), [Realtime image input](https://developers.openai.com/api/docs/guides/realtime-conversations) and [web search](https://developers.openai.com/api/docs/guides/tools-web-search).
+Open **http://localhost:5173** directly in **Chrome or Safari** on this computer, then allow camera and microphone. Embedded app previews can omit device APIs even on localhost; open the same address in a normal browser tab if the app reports that camera access is unavailable. If a model is unavailable to your project, change its environment variable and restart. Defaults: `gpt-6.1-terra` for image recognition `gpt-6.1-sol` for source discovery, and `gpt-realtime-2.1` for voice. See official [models](https://developers.openai.com/api/docs/models), [WebRTC](https://developers.openai.com/api/docs/guides/voice-webrtc), [Realtime image input](https://developers.openai.com/api/docs/guides/realtime-conversations) and [web search](https://developers.openai.com/api/docs/guides/tools-web-search).
 
 Without a key, you can test setup, persistence, calibration, room geometry, errors and export. Recognition and valuation remain explicitly unavailable. No fabricated inventory is presented as live output.
+
+### Camera troubleshooting
+
+- **Embedded preview:** open `http://localhost:5173` directly in Chrome or Safari. HTTPS does not add device support to a browser view that omits camera APIs.
+- **Permission denied:** allow camera and microphone in the browser's site controls. If still denied, enable that browser in macOS System Settings → Privacy & Security → Camera and Microphone, then retry.
+- **No device or device busy:** connect a camera/microphone or close the app using it.
+- **Phone over plain HTTP:** follow the HTTPS setup below; `localhost` on a phone refers to the phone itself.
 
 ### Phone and HTTPS
 
