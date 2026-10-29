@@ -1,0 +1,6 @@
+measurement,tape_measured_value,unit,method,date,notes
+length,,m,,,
+width,,m,,,
+ceiling_height,,m,,,
+floor_area,,m2,,,
+wall_area,,m2,,,

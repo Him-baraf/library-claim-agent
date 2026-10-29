@@ -1,0 +1,12 @@
+{
+  "sweep_id": "",
+  "collected_at": "",
+  "collected_before_tuning": false,
+  "true_book_count": 0,
+  "shelving_units": 0,
+  "enclosed_rooms": 1,
+  "books": [],
+  "items": [],
+  "room": { "length_m": null, "width_m": null, "height_m": null, "floor_area_m2": null, "wall_area_m2": null, "source": "" },
+  "notes": []
+}
