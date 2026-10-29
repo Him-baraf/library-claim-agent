@@ -27,9 +27,27 @@ Without a key, you can test setup, persistence, calibration, room geometry, erro
 - **No device or device busy:** connect a camera/microphone or close the app using it.
 - **Phone over plain HTTP:** follow the HTTPS setup below; `localhost` on a phone refers to the phone itself.
 
-### Phone and HTTPS
+### iPhone testing with trusted HTTPS
 
-Use the same trusted Wi-Fi. Set `DEV_HTTPS=true` in `.env` and restart. Open Vite's printed network HTTPS URL on port 5173. Trust the development certificate in your browser. If iOS refuses camera access with a self-signed certificate, install a trusted local certificate with a tool such as mkcert or use an HTTPS tunnel you control. An ordinary `http://192.168…` URL does not support camera/microphone. First verify desktop localhost. The API remains on loopback; Vite proxies the phone's API/evidence requests.
+`localhost` on your iPhone is the phone, not this laptop. A plain HTTP Wi-Fi address cannot capture camera/microphone. Open the app in **Safari on the iPhone** using a trusted HTTPS route.
+
+For a temporary test link without installing a certificate on the phone:
+
+```bash
+# Terminal1: start local app
+npm run dev
+# Terminal2: build the phone client and start its protected route
+npm run build
+npm run phone:share
+```
+
+Install [Cloudflare's official cloudflared utility](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/) first, or set `CLOUDFLARED_BIN` to its path. `phone:share` explicitly starts an outbound Cloudflare tunnel. Its temporary HTTPS link contains a random access code in the URL fragment; opening it exchanges the code for a Secure/HttpOnly session cookie. Every app/API/evidence request on this route is gated. The OpenAI API key stays on the laptop. Frames, transcripts, claim files and app requests pass through Cloudflare; use this route only when that relay is acceptable. Keep the link private and stop the launcher with Ctrl+C when finished. This closes the gateway/tunnel and revokes its sessions. The laptop must remain awake. `npm run phone` starts only the loopback gateway for local checks and creates no public tunnel.
+
+Open the printed full link in iPhone Safari, tap **Start camera & sweep**, and allow camera and microphone. Keep Safari in the foreground. If playback is silent, tap **Enable speaker**. A local recording needs a running audio context; check any recording-audio warning rather than assuming sound was captured.
+
+Cloudflare Quick Tunnels [do not support SSE](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/#limitations), so the app switches to two-second polling if no valid live state arrives within five seconds. Inventory, capture guidance and packet readiness still update. The frontend is served from the production build, without exposing the Vite development server.
+
+For Wi-Fi-only testing instead, set `DEV_HTTPS=true` and restart Vite, then open its network URL on the phone. iOS may require a properly trusted local CA certificate, not just dismissing a certificate warning. Installing a local CA and explicitly enabling its full trust is a separate device setup; this repo does not change your system trust settings. HTTPS/API transport tests do not replace actual iPhone camera/audio/recording verification.
 
 ### Build and verify
 

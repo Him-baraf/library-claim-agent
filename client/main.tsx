@@ -4,9 +4,15 @@ import type { Book, FrameRecord, Price, SweepState } from "../shared/types";
 import { api, measurement, money, post, safeLink } from "./api";
 import { MeasurementPanel } from "./MeasurementPanel";
 import { connectVoice, type VoiceSession } from "./voice";
-import { startDemoRecorder, type DemoRecorder } from "./recorder";
+import {
+  startDemoRecorder,
+  prepareRecordingAudio,
+  type DemoRecorder,
+  type PreparedRecordingAudio,
+} from "./recorder";
 import "./styles.css";
 import { assessPixels } from "./quality";
+import { subscribeToSweep } from "./live-state";
 import { browserCaptureAccessIssue, mediaRequestError } from "./media-access";
 
 type Health = {
@@ -597,6 +603,7 @@ function App() {
   const [streamStatus, setStreamStatus] = useState("");
   const [recordEnabled, setRecordEnabled] = useState(true);
   const [recording, setRecording] = useState(false);
+  const [recordingWarning, setRecordingWarning] = useState("");
   const [recordingElapsed, setRecordingElapsed] = useState(0);
   const recordingStarted = useRef<number | null>(null);
   const [recordingFile, setRecordingFile] = useState<{
@@ -608,6 +615,7 @@ function App() {
   const media = useRef<MediaStream | null>(null);
   const voice = useRef<VoiceSession | null>(null);
   const recorder = useRef<DemoRecorder | null>(null);
+  const preparedRecordingAudio = useRef<PreparedRecordingAudio | null>(null);
   const upload = useRef<Promise<void> | null>(null);
   const sequence = useRef(0);
   const lastVoiceImage = useRef(0);
@@ -662,6 +670,7 @@ function App() {
       voice.current?.close();
       media.current?.getTracks().forEach((track) => track.stop());
       recorder.current?.cleanup();
+      preparedRecordingAudio.current?.cleanup();
     };
   }, []);
   useEffect(() => {
@@ -674,40 +683,12 @@ function App() {
   }, [hasMedia, sweep?.id]);
   useEffect(() => {
     if (!sweep?.id) return;
-    const source = new EventSource(`/api/sweeps/${sweep.id}/events`);
-    source.addEventListener("state", (event) => {
-      try {
-        update(JSON.parse((event as MessageEvent).data));
-        setStreamStatus("Live updates connected");
-      } catch {
-        addError(
-          "An inventory update could not be read. Refresh the saved sweep to reconnect.",
-        );
-      }
+    return subscribeToSweep(sweep.id, {
+      state: update,
+      guidance: (text) => voice.current?.sayContext(text, true),
+      status: setStreamStatus,
+      error: addError,
     });
-    source.addEventListener("guidance", (event) => {
-      try {
-        const data = JSON.parse((event as MessageEvent).data);
-        const text = typeof data === "string" ? data : data.text;
-        if (text) {
-          voice.current?.sayContext(text, true);
-        }
-      } catch {
-        /* future guidance schema */
-      }
-    });
-    source.addEventListener("error", (event) => {
-      if ("data" in event && (event as MessageEvent).data) {
-        try {
-          addError(JSON.parse((event as MessageEvent).data).message);
-        } catch {
-          /* EventSource network error */
-        }
-      }
-      setStreamStatus("Live updates reconnecting…");
-    });
-    source.onopen = () => setStreamStatus("Live updates connected");
-    return () => source.close();
   }, [sweep?.id, update, addError]);
   useEffect(() => {
     if (!sweep) return;
@@ -859,9 +840,22 @@ function App() {
     }
     setBusy("start");
     setErrors([]);
+    setRecordingWarning("");
+    let preparedAudio: PreparedRecordingAudio | undefined;
     try {
       voice.current?.close();
       voice.current = null;
+      if (!manual && recordEnabled) {
+        try {
+          // This runs inside the Start tap, before camera permission/network awaits on iPhone.
+          preparedAudio = prepareRecordingAudio();
+          preparedRecordingAudio.current = preparedAudio;
+        } catch (cause) {
+          addError(
+            `Recording unavailable: ${messageOf(cause)} Live capture can continue.`,
+          );
+        }
+      }
       if (!manual) await openMedia();
       const state = await post<SweepState>("/api/sweeps", {
         ...setup,
@@ -883,8 +877,16 @@ function App() {
       setRecordingFile(null);
       setCaption("");
       captionRef.current = "";
-      if (!manual && recordEnabled && video.current && media.current) {
+      if (
+        !manual &&
+        recordEnabled &&
+        video.current &&
+        media.current &&
+        preparedAudio
+      ) {
         try {
+          if (preparedAudio.context.state !== "running")
+            await preparedAudio.ready;
           recorder.current = startDemoRecorder(
             video.current,
             media.current,
@@ -893,7 +895,14 @@ function App() {
               caption: captionRef.current,
               shelf: shelfRef.current,
             }),
+            preparedAudio,
+            (message) => {
+              setRecordingWarning(message);
+              addError(message);
+            },
           );
+          preparedRecordingAudio.current = null;
+          preparedAudio = undefined; // Recorder now owns this audio context.
           recordingStarted.current = Date.now();
           setRecording(true);
           setRecordingElapsed(0);
@@ -923,6 +932,9 @@ function App() {
         setHasMedia(false);
       }
     } finally {
+      preparedAudio?.cleanup();
+      if (preparedRecordingAudio.current === preparedAudio)
+        preparedRecordingAudio.current = null;
       setBusy("");
     }
   }
@@ -1181,6 +1193,7 @@ function App() {
       setRecording(false);
     } catch (cause) {
       addError(messageOf(cause));
+      recorder.current?.cleanup();
       setRecording(false);
       recorder.current = null;
     } finally {
@@ -1682,11 +1695,21 @@ function App() {
                         </button>
                         <button
                           className="text-button"
-                          onClick={() =>
-                            void voice.current
-                              ?.replay()
-                              .catch((cause) => addError(messageOf(cause)))
-                          }
+                          onClick={() => {
+                            // Invoke both unlock operations synchronously in this user gesture.
+                            const attempts: Promise<void>[] = [];
+                            if (recorder.current)
+                              attempts.push(recorder.current.resumeAudio());
+                            if (voice.current)
+                              attempts.push(voice.current.replay());
+                            void Promise.allSettled(attempts).then(
+                              (results) => {
+                                for (const result of results)
+                                  if (result.status === "rejected")
+                                    addError(messageOf(result.reason));
+                              },
+                            );
+                          }}
                         >
                           Enable speaker
                         </button>
@@ -1731,6 +1754,11 @@ function App() {
                         Stop & save demo
                       </button>
                     </div>
+                  )}
+                  {recordingWarning && (
+                    <p className="warning" role="status">
+                      {recordingWarning}
+                    </p>
                   )}
                   {recordingFile && (
                     <a
