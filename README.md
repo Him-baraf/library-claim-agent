@@ -45,6 +45,8 @@ Install [Cloudflare's official cloudflared utility](https://developers.cloudflar
 
 Open the printed full link in iPhone Safari, tap **Start camera & sweep**, and allow camera and microphone. Keep Safari in the foreground. If playback is silent, tap **Enable speaker**. A local recording needs a running audio context; check any recording-audio warning rather than assuming sound was captured.
 
+The voice guide stays quiet during normal capture. It gives a brief opening, one short instruction when a capture problem persists, and a report-ready notice. Inventory, prices and diagnostic updates stay on screen; ask aloud for a count or summary. Start a fresh voice session after changing its server instructions.
+
 Cloudflare Quick Tunnels [do not support SSE](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/#limitations), so the app switches to two-second polling if no valid live state arrives within five seconds. Inventory, capture guidance and packet readiness still update. The frontend is served from the production build, without exposing the Vite development server.
 
 For Wi-Fi-only testing instead, set `DEV_HTTPS=true` and restart Vite, then open its network URL on the phone. iOS may require a properly trusted local CA certificate, not just dismissing a certificate warning. Installing a local CA and explicitly enabling its full trust is a separate device setup; this repo does not change your system trust settings. HTTPS/API transport tests do not replace actual iPhone camera/audio/recording verification.
@@ -74,6 +76,8 @@ Single-user local tool; use your machine/trusted network. Hosted deployment and 
 ## Measurement and identification boundaries
 
 Vision detects spine quadrilaterals and reads visible text; it supplies no centimetres or prices. Unreadable titles stay blank. Only complete visible titles above the threshold become identified lines. Open Library corroborates a work, never silently an edition or ISBN.
+
+Spine text is preserved in its original script, including right-to-left and Indic text. Physical-spine detection is separate from title confidence: a clear unreadable spine still counts, while uncertain boundaries and views without an observable spine remain review evidence. Tracking receives explicitly labelled previous and historical evidence images; equal titles alone never merge physical copies. While recognition is busy, the queue keeps a clear recent view of each shelf. Near-black frames remain saved but do not displace a usable view.
 
 A projective homography maps a user-marked known rectangle to metric coordinates. Transformed edges yield spine thickness and height, including horizontal orientation. Measured thickness sums to shelf run. This assumes coplanarity and correct reference dimensions. Scale never transfers between frames/planes. Perspective does not establish depth; unknown depths remain empty.
 

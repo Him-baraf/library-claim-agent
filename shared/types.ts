@@ -8,7 +8,12 @@ export type FrameRecord = {
   height: number;
   shelf_id: string;
   sequence: number;
-  quality?: { blur: number; glare: number };
+  quality?: {
+    blur: number;
+    glare: number;
+    sharpness?: number;
+    brightness?: number;
+  };
   analysis_status: "queued" | "processing" | "done" | "failed" | "skipped";
   error?: string;
 };

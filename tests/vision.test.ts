@@ -38,6 +38,145 @@ const result = (books: ReturnType<typeof detection>[], items: any[] = []) =>
     coverage_notes: [],
   });
 describe("evidence-grounded physical-copy tracking", () => {
+  it("counts a clear unreadable spine independently of title confidence", () => {
+    const s = state();
+    mergeDetections(
+      s,
+      frame,
+      result([
+        detection({
+          title: "",
+          author: "",
+          visible_text: "",
+          confidence: 0,
+          detection_confidence: 0.98,
+          evidence: "spine",
+        }),
+      ]),
+    );
+    expect(s.books).toHaveLength(1);
+    expect(s.books[0]!.title).toBe("");
+    expect(s.books[0]!.status).toBe("unidentified");
+  });
+  it("retains original-script title and author when directly supported", () => {
+    const s = state();
+    mergeDetections(
+      s,
+      frame,
+      result([
+        detection({
+          title: "पुस्तक",
+          author: "लेखक",
+          visible_text: "पुस्तक / लेखक",
+        }),
+        detection({
+          title: "پیر کامل",
+          author: "عمیرہ احمد",
+          visible_text: "پیر کامل / عمیرہ احمد",
+        }),
+      ]),
+    );
+    expect(s.books.map((b) => [b.title, b.author])).toEqual([
+      ["पुस्तक", "लेखक"],
+      ["پیر کامل", "عمیرہ احمد"],
+    ]);
+  });
+  it("leaves ambiguous blurred regions for review instead of inventing book lines", () => {
+    const s = state();
+    mergeDetections(
+      s,
+      frame,
+      result([
+        detection({ detection_confidence: 0.3, evidence: "uncertain" }),
+        detection({ detection_confidence: 0.65, evidence: "page_edges" }),
+      ]),
+    );
+    expect(s.books).toHaveLength(0);
+    expect(s.errors).toHaveLength(2);
+    expect(s.errors.join(" ")).toContain("review the frame before counting");
+  });
+  it("routes new page blocks and covers to review without counting unobserved spines", () => {
+    const s = state();
+    mergeDetections(
+      s,
+      frame,
+      result([
+        detection({ evidence: "page_edges", detection_confidence: 0.95 }),
+        detection({ evidence: "cover_only", detection_confidence: 0.98 }),
+      ]),
+    );
+    expect(s.books).toHaveLength(0);
+    expect(s.errors).toHaveLength(2);
+    expect(s.errors.join(" ")).toContain("no new confirmed book count");
+  });
+  it("preserves a matched spine's evidence and measurement when only page edges are visible later", () => {
+    const original = book({
+      spine_height_cm: 20,
+      spine_thickness_cm: 2,
+      measurement_method: "calibrated spine",
+      replacement_cost: priced(20),
+    });
+    const earlierEvidence = structuredClone(original);
+    const s = state({ books: [original] });
+    mergeDetections(
+      s,
+      frame,
+      result([
+        detection({
+          existing_id: original.id,
+          evidence: "page_edges",
+          detection_confidence: 0.99,
+          quad: quad.map((p) => ({ x: p.x * 0.5, y: p.y * 0.5 })),
+        }),
+      ]),
+    );
+    expect(s.books).toHaveLength(1);
+    expect(s.books[0]).toEqual(earlierEvidence);
+    expect(s.books[0]!.frame_ref).not.toBe(frame.frame_ref);
+    expect(s.errors.join(" ")).toContain(
+      "Earlier spine evidence retained for b1",
+    );
+  });
+  it.each(["page_edges", "cover_only"])(
+    "does not reserve a track for a %s region before its matching physical spine",
+    (evidence) => {
+      const s = state({ books: [book({ id_confidence: 0.8 })] });
+      mergeDetections(
+        s,
+        frame,
+        result([
+          detection({
+            existing_id: "b1",
+            evidence,
+            detection_confidence: 0.99,
+          }),
+          detection({
+            existing_id: "b1",
+            evidence: "spine",
+            detection_confidence: 0.99,
+          }),
+        ]),
+      );
+      expect(s.books).toHaveLength(1);
+      expect(s.books[0]!.id).toBe("b1");
+      expect(s.books[0]!.frame_ref).toBe(frame.frame_ref);
+      expect(s.errors.join(" ")).not.toContain("Ambiguous duplicate track");
+    },
+  );
+  it("does not alter model observations while rejecting unsupported identity fields", () => {
+    const s = state();
+    const observed = result([detection({ author: "Unsupported author" })]);
+    mergeDetections(s, frame, observed);
+    expect(observed.books[0]!.author).toBe("Unsupported author");
+    expect(s.books[0]!.author).toBe("");
+  });
+  it("flags a possible repeat view without merging legitimate same-title copies", () => {
+    const s = state({ books: [book()] });
+    mergeDetections(s, frame, result([detection()]));
+    expect(s.books).toHaveLength(2);
+    expect(s.books[1]!.notes.join(" ")).toMatch(/Possible repeat view of b1/);
+    expect(s.errors.join(" ")).toMatch(/physical-copy identity is unconfirmed/);
+  });
   it("rejects an asserted title unsupported by the visible OCR text", () => {
     const s = state();
     mergeDetections(

@@ -12,6 +12,11 @@ import {
 } from "./recorder";
 import "./styles.css";
 import { assessPixels } from "./quality";
+import {
+  CAPTURE_INSTRUCTIONS,
+  localCaptureInstruction,
+  spokenCaptureInstruction,
+} from "../shared/capture-guidance";
 import { createCameraPreview, type CameraPreview } from "./camera-preview";
 import { subscribeToSweep } from "./live-state";
 import { browserCaptureAccessIssue, mediaRequestError } from "./media-access";
@@ -632,6 +637,10 @@ function App() {
     pixels: Uint8ClampedArray;
   } | null>(null);
   const lastQualityCue = useRef(0);
+  const persistentQualityCue = useRef<{ text: string | null; count: number }>({
+    text: null,
+    count: 0,
+  });
   const [localCue, setLocalCue] = useState<string | null>(null);
   const live = useRef(false);
   const finalReadback = useRef("");
@@ -693,7 +702,10 @@ function App() {
     if (!sweep?.id) return;
     return subscribeToSweep(sweep.id, {
       state: update,
-      guidance: (text) => voice.current?.sayContext(text, true),
+      guidance: (text) => {
+        const instruction = spokenCaptureInstruction(text);
+        if (instruction) voice.current?.sayContext(instruction, true);
+      },
       status: setStreamStatus,
       error: addError,
     });
@@ -710,11 +722,11 @@ function App() {
       finalReadback.current !== sweep.id
     ) {
       finalReadback.current = sweep.id;
-      const total = sweep.packet.totals;
       voice.current?.sayContext(
-        `The final claim packet is ready. ${total.book_count} books, ${total.books_identified} identified, ${sweep.items.filter((item) => !item.excluded).length} non-book items. Sourced book replacement subtotal ${money(total.books_replacement_cost, sweep.currency)} and used subtotal ${money(total.books_used_value, sweep.currency)}. Floor area ${measurement(sweep.room.floor_area_m2, "square metres")}. ${sweep.review_queue.length} review flags. Unknown prices and appraisal items are excluded; these are partial evidence-based totals. Read back this short summary and tell the claimant the JSON, HTML report and evidence ZIP are ready.`,
-        true,
+        `Final figures for direct questions only: ${JSON.stringify(sweep.packet.totals)}. Unknown and appraisal-only values are excluded. Do not read these figures aloud unless asked.`,
+        false,
       );
+      voice.current?.sayContext(CAPTURE_INSTRUCTIONS.ready, true);
       void refreshSessions();
     }
   }, [sweep]);
@@ -736,13 +748,14 @@ function App() {
         status: item.status,
         art_is_print: item.art_is_print,
       })),
+      totals: sweep.packet?.totals || null,
     };
     const fingerprint = JSON.stringify(inventory);
     if (inventoryFingerprint.current !== fingerprint) {
       inventoryFingerprint.current = fingerprint;
       voice.current.sayContext(
-        `Latest verified inventory with target IDs for corrections: ${fingerprint}. Briefly say what is logged only from this inventory, and ask original versus print for art that is not confirmed.`,
-        sweep.status === "capturing",
+        `Internal inventory and correction IDs: ${fingerprint}. Use only to answer a direct question or apply a correction. Do not announce or read this inventory aloud.`,
+        false,
       );
     }
   }, [sweep]);
@@ -1019,16 +1032,22 @@ function App() {
           pixels,
         };
         setLocalCue(quality.cue);
+        const instruction = localCaptureInstruction(quality);
+        persistentQualityCue.current =
+          instruction === persistentQualityCue.current.text
+            ? {
+                text: instruction,
+                count: persistentQualityCue.current.count + 1,
+              }
+            : { text: instruction, count: 1 };
         if (
-          quality.cue &&
-          Date.now() - lastQualityCue.current > 12000 &&
+          instruction &&
+          persistentQualityCue.current.count >= 2 &&
+          Date.now() - lastQualityCue.current > 20000 &&
           /shelf|book|row/i.test(shelfRef.current)
         ) {
           lastQualityCue.current = Date.now();
-          voice.current?.sayContext(
-            `Local capture heuristic, not an OCR result: ${quality.cue}`,
-            true,
-          );
+          voice.current?.sayContext(instruction, true);
         }
       }
       const image = canvas.toDataURL("image/jpeg", 0.9);
@@ -1085,10 +1104,7 @@ function App() {
       if (upload.current) await upload.current;
       await takeFrame();
       update(await post(`/api/sweeps/${sweep.id}/finish`));
-      voice.current?.sayContext(
-        "The continuous capture has ended. Background identification, sourced pricing and review are now finishing. Explain that the claimant can mark known reference planes on saved frames while pricing finishes, without another camera pass. Do not claim any unknown totals.",
-        true,
-      );
+      voice.current?.sayContext(CAPTURE_INSTRUCTIONS.finishing, true);
     } catch (cause) {
       addError(messageOf(cause));
     } finally {

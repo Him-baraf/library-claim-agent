@@ -7,6 +7,21 @@ import { config } from "../server/config";
 import { book, item, state } from "./domain-fixtures";
 
 describe("shared Realtime session configuration", () => {
+  it("defaults to silence and one short capture action without inventory narration", () => {
+    const session = realtimeSessionConfig(state());
+    expect(session.max_output_tokens).toBe(384);
+    expect(session.instructions).toContain("Default to silence");
+    expect(session.instructions).toContain("8–12 words");
+    expect(session.instructions).toContain(
+      "Successful tool calls need no spoken acknowledgement",
+    );
+    expect(session.instructions).toContain("Never read them aloud");
+    expect(session.instructions).toContain("one sentence of at most 20 words");
+    expect(session.instructions).not.toContain(
+      "read supplied deterministic totals",
+    );
+    expect(session.audio.input.turn_detection.create_response).toBe(true);
+  });
   it("uses the configured model, audio transcription, and interruptible turn detection", () => {
     const session = realtimeSessionConfig(state());
     expect(session.type).toBe("realtime");

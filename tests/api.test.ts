@@ -153,6 +153,31 @@ describe("local sweep API and durable evidence", () => {
     ).toBe(true);
     expect(vi.mocked(fetch)).not.toHaveBeenCalled();
   });
+  it("saves a covered-lens frame without sending it for recognition", async () => {
+    const s = await create();
+    const darkImage = `data:image/jpeg;base64,${(
+      await sharp({
+        create: { width: 64, height: 48, channels: 3, background: "#000" },
+      })
+        .jpeg()
+        .toBuffer()
+    ).toString("base64")}`;
+    const response = await request(app)
+      .post(`/api/sweeps/${s.id}/frames`)
+      .send({ image: darkImage, shelf_id: "shelf-one", sequence: 1 })
+      .expect(202);
+    expect(response.body.analysis_status).toBe("skipped");
+    expect(response.body.error).toContain("Near-black");
+    expect(response.body.quality.brightness).toBeLessThan(10);
+    await request(app).get(response.body.frame_ref).expect(200);
+    const saved = (await request(app).get(`/api/sweeps/${s.id}`).expect(200))
+      .body;
+    expect(saved.books).toEqual([]);
+    expect(
+      saved.review_queue.some((q: any) => /Near-black/.test(q.reason)),
+    ).toBe(true);
+    expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  });
   it("requires calibrations to reference this sweep and rejects crossed quadrilaterals", async () => {
     const a = await create(),
       b = await create(),

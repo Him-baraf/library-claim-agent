@@ -9,12 +9,21 @@ import { store, type SweepStore } from "./store";
 import { detectFrame, mergeDetections } from "./vision";
 import { priceBook, priceItem } from "./pricing";
 import {
+  computeFrameQuality,
+  isUnusableFrame,
+  shouldReplacePendingFrame,
+} from "./frame-quality";
+import {
   scheduleValuation,
   drainValuation,
   valuationSignal,
   releaseValuation,
 } from "./valuation";
 import type { FrameRecord, SweepState } from "../shared/types";
+import {
+  CAPTURE_INSTRUCTIONS,
+  frameCaptureInstruction,
+} from "../shared/capture-guidance";
 
 const processing = new Map<string, Promise<void>>();
 const pending = new Map<string, FrameRecord[]>();
@@ -37,12 +46,17 @@ export function refresh(state: SweepState) {
 }
 export function enqueueFrame(state: SweepState, frame: FrameRecord) {
   const queue = pending.get(state.id) || [];
-  // Preserve the active frame and latest frame for each named shelf; intermediate views remain saved evidence.
+  // Preserve the active frame and a clear recent view per shelf; every view remains saved evidence.
   const obsolete = queue.findIndex((f) => f.shelf_id === frame.shelf_id);
   if (obsolete >= 0) {
+    if (!shouldReplacePendingFrame(queue[obsolete], frame)) {
+      frame.analysis_status = "skipped";
+      frame.error = "A clearer recent view of this shelf is already queued.";
+      return;
+    }
     queue[obsolete].analysis_status = "skipped";
     queue[obsolete].error =
-      "Superseded by a newer view while identification was busy.";
+      "Superseded by a clearer or more recent view while identification was busy.";
     queue.splice(obsolete, 1);
   }
   queue.push(frame);
@@ -74,12 +88,31 @@ async function drain(state: SweepState) {
         )
         .at(-1);
       const image = await imageData(state, frame);
+      const references = [
+        ...new Set(
+          state.books
+            .filter((b) => b.shelf === frame.shelf_id && !b.excluded)
+            .sort((a, b) => b.id_confidence - a.id_confidence)
+            .map((b) => b.frame_ref),
+        ),
+      ]
+        .filter((ref) => ref !== frame.frame_ref && ref !== previous?.frame_ref)
+        .map((ref) => state.frames.find((f) => f.frame_ref === ref))
+        .filter((f): f is FrameRecord => !!f)
+        .slice(0, 2);
+      const reference_images = await Promise.all(
+        references.map(async (f) => ({
+          frame_ref: f.frame_ref,
+          image: await imageData(state, f),
+        })),
+      );
       const { result, metric } = await detectFrame(
         state,
         frame,
         image,
         previous ? await imageData(state, previous) : undefined,
         controllers.get(state.id)?.signal,
+        { previous_frame_ref: previous?.frame_ref, reference_images },
       );
       if (controllers.get(state.id)?.signal.aborted)
         throw new Error(
@@ -87,6 +120,10 @@ async function drain(state: SweepState) {
         );
       await store.stage(state.id, `vision-${frame.id}`, {
         frame_ref: frame.frame_ref,
+        tracking_frame_refs: [
+          previous?.frame_ref,
+          ...references.map((f) => f.frame_ref),
+        ].filter(Boolean),
         ...result,
       });
       state.metrics.push(metric);
@@ -96,16 +133,23 @@ async function drain(state: SweepState) {
         refresh(state);
         await store.save(state);
       });
-      if (result.quality.guidance)
-        store.guidance(state, result.quality.guidance);
+      // Keep descriptive diagnostics on screen; automatically speak only a short actionable cue.
+      if (result.quality.guidance) state.guidance.push(result.quality.guidance);
+      const instruction = frameCaptureInstruction(
+        result.quality,
+        result.books.some(
+          (b) => b.evidence !== "uncertain" && b.detection_confidence >= 0.7,
+        ),
+      );
+      if (instruction) store.guidance(state, instruction);
       for (const item of state.items.filter(
-        (i) => i.status === "needs_appraisal",
+        (i) =>
+          i.status === "needs_appraisal" &&
+          !i.art_is_print &&
+          /\b(art|portrait|painting)\b/i.test(`${i.category} ${i.description}`),
       ))
-        if (!state.guidance.some((t) => t.includes(item.id)))
-          store.guidance(
-            state,
-            `${item.id}: is the ${item.category} an original or a print? Originals need appraisal.`,
-          );
+        if (!state.guidance.includes(CAPTURE_INSTRUCTIONS.art))
+          store.guidance(state, CAPTURE_INSTRUCTIONS.art);
     } catch (error) {
       frame.analysis_status = "failed";
       frame.error = safeError(error);
@@ -168,10 +212,18 @@ export async function saveFrame(
     shelf_id: input.shelf_id,
     sequence: input.sequence,
     analysis_status: "queued",
+    quality: await computeFrameQuality(encoded.data),
   };
   state.frames.push(frame);
+  if (isUnusableFrame(frame.quality)) {
+    frame.analysis_status = "skipped";
+    frame.error =
+      "Near-black frame saved as evidence; recognition needs a lit view.";
+  } else {
+    enqueueFrame(state, frame);
+  }
+  refresh(state);
   await store.save(state);
-  enqueueFrame(state, frame);
   return frame;
 }
 
@@ -323,10 +375,7 @@ async function finalize(state: SweepState) {
     state.packet = buildPacket(state);
     await writePacket(state);
     await store.save(state);
-    store.guidance(
-      state,
-      `Packet ready: ${state.packet.totals.book_count} books, ${state.packet.totals.books_identified} identified, ${state.items.filter((i) => !i.excluded).length} other items, ${state.review_queue.length} review flags. Replacement books total ${state.currency} ${state.packet.totals.books_replacement_cost}. Unknown prices and appraisal items are excluded. Please review the report.`,
-    );
+    store.guidance(state, CAPTURE_INSTRUCTIONS.ready);
   }
 }
 export async function writePacket(state: SweepState) {
