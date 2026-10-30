@@ -37,7 +37,7 @@ describe("shared Realtime session configuration", () => {
     });
     expect(session.audio.output.voice).toBe("marin");
   });
-  it("grounds spoken intake in locale and current inventory and exposes correction/shelf tools", () => {
+  it("grounds spoken intake in locale and current inventory and exposes capture tools", () => {
     const original = state({
       country: "IN",
       currency: "INR",
@@ -55,6 +55,7 @@ describe("shared Realtime session configuration", () => {
     expect(session.tools.map((tool) => tool.name)).toEqual([
       "record_correction",
       "set_shelf",
+      "finish_capture",
     ]);
     expect(
       session.tools.find((tool) => tool.name === "record_correction"),
@@ -68,6 +69,48 @@ describe("shared Realtime session configuration", () => {
     expect(original).toEqual(before);
     expect(session).not.toHaveProperty("api_key");
     expect(session).not.toHaveProperty("client_secret");
+  });
+  it("accepts a few available books without requiring room coverage or measurements", () => {
+    const session = realtimeSessionConfig(state());
+    expect(session.instructions).toContain(
+      "A few books on a desk or shelf are enough",
+    );
+    expect(session.instructions).toContain(
+      "Do not ask them to sweep the whole room",
+    );
+    expect(session.instructions).toContain(
+      "Unknown room dimensions and areas remain unknown",
+    );
+    expect(session.instructions).toContain("available book spines");
+    expect(session.instructions).not.toContain(
+      "One continuous room sweep, including stacked books, walls, corners and floor",
+    );
+  });
+  it("offers parameter-free whole-capture completion and distinguishes continuing or quoted speech", () => {
+    const session = realtimeSessionConfig(state());
+    expect(
+      session.tools.find((tool) => tool.name === "finish_capture"),
+    ).toMatchObject({
+      type: "function",
+      parameters: {
+        type: "object",
+        additionalProperties: false,
+        properties: {},
+        required: [],
+      },
+    });
+    for (const phrase of ["that's all", "no other books", "I'm done"])
+      expect(session.instructions).toContain(phrase);
+    expect(session.instructions).toContain("call finish_capture immediately");
+    expect(session.instructions).toContain("I'm not done");
+    expect(session.instructions).toContain("question or quoted example");
+    expect(session.instructions).toContain("that's all for this shelf");
+    expect(session.instructions).toContain(
+      "The client gives one brief preparing-report reply",
+    );
+    expect(session.instructions).toContain(
+      "report-ready notice comes only after actual completion",
+    );
   });
   it("redacts standard and ephemeral credentials from bounded provider error messages", () => {
     const result = realtimeUpstreamError(

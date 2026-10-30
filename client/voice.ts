@@ -1,10 +1,12 @@
 import { post } from "./api";
+import { CAPTURE_INSTRUCTIONS } from "../shared/capture-guidance";
 
 export type VoiceCallbacks = {
   status: (status: string) => void;
   caption: (role: "user" | "assistant", text: string, final: boolean) => void;
   correction: (args: Record<string, unknown>) => Promise<unknown>;
   shelf: (id: string) => void | Promise<void>;
+  finish: () => Promise<unknown>;
   error: (message: string) => void;
   remote: (stream: MediaStream) => void;
   usage?: (event: unknown) => void;
@@ -56,9 +58,16 @@ export async function connectVoice(
   let lastAutomaticSpeech = Number.NEGATIVE_INFINITY;
   let responding = false;
   let activeTools = 0;
-  let pendingSpeech: { text: string; key: string; queuedAt: number } | null =
-    null;
+  let pendingSpeech: {
+    text: string;
+    key: string;
+    queuedAt: number;
+    immediate: boolean;
+  } | null = null;
   let pendingTimer: ReturnType<typeof setTimeout> | undefined;
+  let finishWork: Promise<unknown> | undefined;
+  let finishResult: unknown;
+  let captureFinished = false;
   const calls = new Set<string>();
   const spokenCues = new Map<string, number>();
   const send = (event: unknown) => {
@@ -74,7 +83,10 @@ export async function connectVoice(
     )
       return;
     if (!pendingSpeech) return;
-    if (Date.now() - pendingSpeech.queuedAt > AUTOMATIC_CUE_MAX_AGE_MS) {
+    if (
+      !pendingSpeech.immediate &&
+      Date.now() - pendingSpeech.queuedAt > AUTOMATIC_CUE_MAX_AGE_MS
+    ) {
       pendingSpeech = null;
       return;
     }
@@ -86,10 +98,12 @@ export async function connectVoice(
       pendingSpeech = null;
       return;
     }
-    const delay = Math.max(
-      0,
-      AUTOMATIC_CUE_INTERVAL_MS - (Date.now() - lastAutomaticSpeech),
-    );
+    const delay = pendingSpeech.immediate
+      ? 0
+      : Math.max(
+          0,
+          AUTOMATIC_CUE_INTERVAL_MS - (Date.now() - lastAutomaticSpeech),
+        );
     if (delay) {
       if (pendingTimer) clearTimeout(pendingTimer);
       pendingTimer = setTimeout(drainResponses, delay);
@@ -97,6 +111,8 @@ export async function connectVoice(
     }
     const cue = pendingSpeech;
     pendingSpeech = null;
+    if (pendingTimer) clearTimeout(pendingTimer);
+    pendingTimer = undefined;
     lastAutomaticSpeech = Date.now();
     for (const [key, at] of spokenCues)
       if (Date.now() - at >= REPEATED_CUE_INTERVAL_MS) spokenCues.delete(key);
@@ -137,12 +153,38 @@ export async function connectVoice(
       callbacks.status("Listening · speak naturally to interrupt");
   };
   for (const track of stream.getAudioTracks()) pc.addTrack(track, stream);
+  const failed = (result: unknown): boolean =>
+    Boolean(
+      result &&
+      typeof result === "object" &&
+      (("error" in result && result.error) ||
+        ("ok" in result && result.ok === false)),
+    );
+  async function finishCapture() {
+    if (captureFinished) return finishResult;
+    if (!finishWork) {
+      // All repeated finish calls share one request; failures can be retried on a later turn.
+      finishWork = Promise.resolve()
+        .then(() => callbacks.finish())
+        .then((result) => {
+          if (!failed(result)) {
+            captureFinished = true;
+            finishResult = result ?? { ok: true };
+          }
+          return result ?? { ok: true };
+        })
+        .finally(() => {
+          finishWork = undefined;
+        });
+    }
+    return finishWork;
+  }
   async function tool(event: {
     name: string;
     arguments: string;
     call_id: string;
   }) {
-    if (calls.has(event.call_id)) return;
+    if (closed || calls.has(event.call_id)) return;
     calls.add(event.call_id);
     activeTools++;
     let output: unknown;
@@ -157,24 +199,30 @@ export async function connectVoice(
         if (!shelf) throw new Error("A shelf label is required.");
         await callbacks.shelf(shelf);
         output = { ok: true, shelf_id: shelf };
+      } else if (event.name === "finish_capture") {
+        if (
+          !args ||
+          typeof args !== "object" ||
+          Array.isArray(args) ||
+          Object.keys(args).length
+        )
+          throw new Error("Finish capture takes no arguments.");
+        output = await finishCapture();
       } else output = { error: "Unknown tool" };
     } catch (error) {
       output = {
         error: error instanceof Error ? error.message : String(error),
       };
     }
-    if (
-      output &&
-      typeof output === "object" &&
-      (("error" in output && output.error) ||
-        ("ok" in output && output.ok === false))
-    )
+    if (failed(output))
       callbacks.error(
         event.name === "record_correction"
           ? "Correction was not saved. Try again or enter a typed correction."
           : event.name === "set_shelf"
             ? "Shelf label was not changed. Try saying the shelf label again."
-            : "Voice action failed. Try again or enter a typed correction.",
+            : event.name === "finish_capture"
+              ? "Capture was not finished. Say that’s all again or tap End capture."
+              : "Voice action failed. Try again or enter a typed correction.",
       );
     send({
       type: "conversation.item.create",
@@ -197,7 +245,7 @@ export async function connectVoice(
       response: {
         max_output_tokens: 384,
         instructions:
-          "Use one sentence of at most 20 words: confirm the configured country/currency and ask to show the first shelf slowly. Stop there.",
+          "Use one sentence of at most 20 words: confirm the configured country/currency, invite available book spines, and say to finish with ‘that’s all’. No whole-room request.",
       },
     });
   };
@@ -251,12 +299,21 @@ export async function connectVoice(
           text: event.transcript,
         }).catch((error) => callbacks.error(error.message));
       }
-      if (event.type === "response.function_call_arguments.done")
+      if (
+        event.type === "response.function_call_arguments.done" &&
+        event.name !== "finish_capture"
+      )
         void tool(event);
       if (event.type === "response.done") {
         responding = false;
         for (const output of event.response?.output || [])
-          if (output.type === "function_call") void tool(output);
+          if (
+            output.type === "function_call" &&
+            (output.name !== "finish_capture" ||
+              (event.response.status === "completed" &&
+                (!output.status || output.status === "completed")))
+          )
+            void tool(output);
         callbacks.status("Listening · speak naturally to interrupt");
         callbacks.usage?.(event);
         drainResponses();
@@ -320,14 +377,18 @@ export async function connectVoice(
         const cue = spokenCue(text);
         if (!cue) return;
         const key = cueKey(cue);
+        const immediate =
+          cue === CAPTURE_INSTRUCTIONS.finishing ||
+          cue === CAPTURE_INSTRUCTIONS.ready;
         const previous = spokenCues.get(key);
         if (
           previous !== undefined &&
           Date.now() - previous < REPEATED_CUE_INTERVAL_MS
         )
           return;
+        if (pendingSpeech?.immediate && !immediate) return;
         if (pendingSpeech?.key !== key)
-          pendingSpeech = { text: cue, key, queuedAt: Date.now() };
+          pendingSpeech = { text: cue, key, queuedAt: Date.now(), immediate };
         drainResponses();
       }
     },

@@ -628,6 +628,7 @@ function App() {
   const recorder = useRef<DemoRecorder | null>(null);
   const preparedRecordingAudio = useRef<PreparedRecordingAudio | null>(null);
   const upload = useRef<Promise<void> | null>(null);
+  const finishing = useRef<Promise<SweepState> | null>(null);
   const sequence = useRef(0);
   const lastVoiceImage = useRef(0);
   const previousThumbnail = useRef<{
@@ -803,6 +804,10 @@ function App() {
         };
       },
       shelf: chooseShelf,
+      finish: async () => {
+        const result = await finish();
+        return { ok: true, status: result.status };
+      },
       remote: (stream) => recorder.current?.addRemote(stream),
       usage: (event) => {
         const response = (
@@ -1096,18 +1101,28 @@ function App() {
   }, [capturing, takeFrame]);
 
   async function finish() {
-    if (!sweep) return;
-    setBusy("finish");
-    live.current = false;
-    setCapturing(false);
-    try {
-      if (upload.current) await upload.current;
+    if (finishing.current) return finishing.current;
+    // Voice callbacks outlive their render; always finish the current session.
+    const current = sweepRef.current;
+    if (!current) throw new Error("Start a capture before preparing a report.");
+    if (current.status === "processing" || current.status === "complete")
+      return current;
+    const work = (async () => {
+      setBusy("finish");
+      live.current = false;
+      setCapturing(false);
+      if (upload.current) await upload.current.catch(() => undefined);
       await takeFrame();
-      update(await post(`/api/sweeps/${sweep.id}/finish`));
+      const result = await post<SweepState>(`/api/sweeps/${current.id}/finish`);
+      if (sweepRef.current?.id === current.id) update(result);
       voice.current?.sayContext(CAPTURE_INSTRUCTIONS.finishing, true);
-    } catch (cause) {
-      addError(messageOf(cause));
+      return result;
+    })();
+    finishing.current = work;
+    try {
+      return await work;
     } finally {
+      if (finishing.current === work) finishing.current = null;
       setBusy("");
     }
   }
@@ -1327,31 +1342,33 @@ function App() {
             <div className="intro">
               <span className="eyebrow">Contents claim intake</span>
               <h2>
-                One room.
+                Show your books.
                 <br />
-                One continuous sweep.
+                Finish when you’re done.
               </h2>
               <p>
-                Walk slowly across every shelf, then include furniture, floor,
-                and walls. Speak naturally—the agent will ask for clearer views
-                and build an inventory while you move.
+                Point the camera at the books you want to include. A few books
+                on a desk or shelf are enough. Tap End capture when you’re done,
+                or say “that’s all” or “no other books.”
               </p>
               <ol className="instructions">
                 <li>
-                  Use good light. Keep spines in focus and pause briefly on each
-                  shelf row.
+                  Use good light. Keep the full book spines in focus and pause
+                  briefly while they are saved.
                 </li>
                 <li>
-                  Label each new shelf. Include the full spine of flat and
-                  stacked books.
+                  Include flat and stacked books too. Repeated views of the same
+                  books stay in the same shelf group.
                 </li>
                 <li>
-                  Keep a known rectangular reference in view for metric
-                  measurements, or provide dimensions you already know.
+                  For metric measurements, include a known rectangular reference
+                  or provide dimensions you already know. Unknown measurements
+                  stay blank.
                 </li>
                 <li>
-                  End the sweep, mark scale on saved frames, then download the
-                  claim packet.
+                  Say “that’s all” or tap End capture, then download the report.
+                  You can include furniture, walls and floor if you want a
+                  larger inventory.
                 </li>
               </ol>
               <p className="hint">
@@ -1561,12 +1578,14 @@ function App() {
                 {sweep.status === "capturing" && (
                   <button
                     className="primary"
-                    onClick={finish}
+                    onClick={() =>
+                      void finish().catch((cause) => addError(messageOf(cause)))
+                    }
                     disabled={!!busy}
                   >
                     {busy === "finish"
                       ? "Ending capture…"
-                      : "End sweep & prepare packet"}
+                      : "End capture & prepare report"}
                   </button>
                 )}
                 {sweep.status === "processing" && (

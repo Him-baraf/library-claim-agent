@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { connectVoice } from "../client/voice";
+import { CAPTURE_INSTRUCTIONS } from "../shared/capture-guidance";
 class Channel {
   readyState = "open";
   bufferedAmount = 0;
@@ -65,6 +66,7 @@ const callbacks = () => ({
   caption: vi.fn(),
   correction: vi.fn(async () => ({ ok: true })),
   shelf: vi.fn(),
+  finish: vi.fn(async () => ({ ok: true })),
   error: vi.fn(),
   remote: vi.fn(),
 });
@@ -109,6 +111,10 @@ describe("quiet voice scheduling", () => {
       "one sentence of at most 20 words",
     );
     expect(greeting[0].response.instructions).not.toContain("whole workflow");
+    expect(greeting[0].response.instructions).toContain(
+      "available book spines",
+    );
+    expect(greeting[0].response.instructions).toContain("that’s all");
     session.close();
   });
   it("spaces automatic cues by twenty seconds, including after the greeting", async () => {
@@ -269,5 +275,183 @@ describe("quiet voice scheduling", () => {
     session.close();
     await vi.advanceTimersByTimeAsync(30000);
     expect(channel.responses()).toHaveLength(1);
+  });
+
+  it("finishes only after a completed tool response and submits repeated calls once", async () => {
+    let resolve: ((value: unknown) => void) | undefined;
+    const hooks = {
+      ...callbacks(),
+      finish: vi.fn(
+        () =>
+          new Promise<unknown>((r) => {
+            resolve = r;
+          }),
+      ),
+    };
+    const session = await connectVoice("test", stream, hooks);
+    const call = {
+      name: "finish_capture",
+      arguments: "{}",
+      call_id: "finish-1",
+    };
+    channel.event({ type: "response.function_call_arguments.done", ...call });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hooks.finish).not.toHaveBeenCalled();
+    const finishEvent = (call_id: string) => ({
+      type: "response.done",
+      response: {
+        status: "completed",
+        output: [{ type: "function_call", ...call, call_id }],
+      },
+    });
+    channel.event(finishEvent("finish-1"));
+    channel.event(finishEvent("finish-1"));
+    channel.event(finishEvent("finish-2"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hooks.finish).toHaveBeenCalledTimes(1);
+    resolve?.({ ok: true, status: "processing" });
+    await vi.advanceTimersByTimeAsync(0);
+    channel.event(finishEvent("finish-3"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hooks.finish).toHaveBeenCalledTimes(1);
+    expect(
+      channel
+        .messages()
+        .filter((event) => event.item?.type === "function_call_output"),
+    ).toHaveLength(3);
+    expect(hooks.error).not.toHaveBeenCalled();
+    expect(channel.responses()).toHaveLength(0);
+    session.close();
+  });
+
+  it.each(["cancelled", "incomplete", "failed", undefined])(
+    "does not finish when the response status is %s",
+    async (status) => {
+      const hooks = callbacks();
+      const session = await connectVoice("test", stream, hooks);
+      const call = {
+        type: "function_call",
+        name: "finish_capture",
+        arguments: "{}",
+        call_id: "cancelled-finish",
+      };
+      channel.event({ ...call, type: "response.function_call_arguments.done" });
+      channel.event({
+        type: "response.done",
+        response: { status, output: [call] },
+      });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(hooks.finish).not.toHaveBeenCalled();
+      expect(
+        channel
+          .messages()
+          .some((event) => event.item?.type === "function_call_output"),
+      ).toBe(false);
+      session.close();
+    },
+  );
+
+  it.each(["rejected", "error result", "false result"])(
+    "shows a failed finish with %s and allows a later retry",
+    async (failure) => {
+      const hooks = {
+        ...callbacks(),
+        finish: vi
+          .fn()
+          .mockImplementationOnce(async () => {
+            if (failure === "rejected") throw new Error("Upload incomplete");
+            return failure === "error result"
+              ? { error: "Upload incomplete" }
+              : { ok: false };
+          })
+          .mockResolvedValue({ ok: true }),
+      };
+      const session = await connectVoice("test", stream, hooks);
+      const finishEvent = (call_id: string) => ({
+        type: "response.done",
+        response: {
+          status: "completed",
+          output: [
+            {
+              type: "function_call",
+              name: "finish_capture",
+              arguments: "{}",
+              call_id,
+            },
+          ],
+        },
+      });
+      channel.event(finishEvent("first-finish"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(hooks.error).toHaveBeenCalledWith(
+        "Capture was not finished. Say that’s all again or tap End capture.",
+      );
+      channel.event(finishEvent("retry-finish"));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(hooks.finish).toHaveBeenCalledTimes(2);
+      expect(channel.responses()).toHaveLength(0);
+      session.close();
+    },
+  );
+
+  it("rejects malformed finish arguments without ending capture", async () => {
+    const hooks = callbacks();
+    const session = await connectVoice("test", stream, hooks);
+    channel.event({
+      type: "response.done",
+      response: {
+        status: "completed",
+        output: [
+          {
+            type: "function_call",
+            name: "finish_capture",
+            arguments: '{"force":true}',
+            call_id: "invalid-finish",
+          },
+        ],
+      },
+    });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(hooks.finish).not.toHaveBeenCalled();
+    expect(hooks.error).toHaveBeenCalledTimes(1);
+    session.close();
+  });
+
+  it("announces finishing promptly after a short capture, then announces readiness once", async () => {
+    const session = await connectVoice("test", stream, callbacks());
+    channel.onopen?.();
+    session.sayContext(CAPTURE_INSTRUCTIONS.finishing, true);
+    expect(channel.responses()).toHaveLength(1);
+    done();
+    expect(channel.responses()).toHaveLength(2);
+    expect(channel.responses()[1].response.instructions).toContain(
+      CAPTURE_INSTRUCTIONS.finishing,
+    );
+    session.sayContext(CAPTURE_INSTRUCTIONS.ready, true);
+    done();
+    expect(channel.responses()).toHaveLength(3);
+    expect(channel.responses()[2].response.instructions).toContain(
+      CAPTURE_INSTRUCTIONS.ready,
+    );
+    done();
+    session.sayContext(CAPTURE_INSTRUCTIONS.ready, true);
+    expect(channel.responses()).toHaveLength(3);
+    session.close();
+  });
+
+  it("keeps the completion reply queued ahead of quality cues while the claimant speaks", async () => {
+    const session = await connectVoice("test", stream, callbacks());
+    channel.event({ type: "input_audio_buffer.speech_started" });
+    session.sayContext(CAPTURE_INSTRUCTIONS.finishing, true);
+    session.sayContext(CAPTURE_INSTRUCTIONS.blur, true);
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(channel.responses()).toHaveLength(0);
+    channel.event({ type: "input_audio_buffer.speech_stopped" });
+    done();
+    expect(channel.responses()).toHaveLength(1);
+    expect(channel.responses()[0].response.instructions).toContain(
+      CAPTURE_INSTRUCTIONS.finishing,
+    );
+    session.close();
   });
 });

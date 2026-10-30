@@ -47,6 +47,8 @@ Open the printed full link in iPhone Safari, tap **Start camera & sweep**, and a
 
 The voice guide stays quiet during normal capture. It gives a brief opening, one short instruction when a capture problem persists, and a report-ready notice. Inventory, prices and diagnostic updates stay on screen; ask aloud for a count or summary. Start a fresh voice session after changing its server instructions.
 
+For a small test, show whichever books you have on a desk or shelf, then tap **End capture & prepare report**. You can also say “that's all” or “no other books.” A library, full-room pass, or minimum book count is not required to finish. The report uses the saved evidence; uncaptured room measurements remain unknown. The assignment's separate real-room evaluation still requires its specified ground truth and sample sizes.
+
 Cloudflare Quick Tunnels [do not support SSE](https://developers.cloudflare.com/tunnel/get-started/quick-tunnels/#limitations), so the app switches to two-second polling if no valid live state arrives within five seconds. Inventory, capture guidance and packet readiness still update. The frontend is served from the production build, without exposing the Vite development server.
 
 For Wi-Fi-only testing instead, set `DEV_HTTPS=true` and restart Vite, then open its network URL on the phone. iOS may require a properly trusted local CA certificate, not just dismissing a certificate warning. Installing a local CA and explicitly enabling its full trust is a separate device setup; this repo does not change your system trust settings. HTTPS/API transport tests do not replace actual iPhone camera/audio/recording verification.

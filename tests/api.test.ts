@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import request from "supertest";
 import sharp from "sharp";
+import { promises as fs } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -177,6 +178,89 @@ describe("local sweep API and durable evidence", () => {
       saved.review_queue.some((q: any) => /Near-black/.test(q.reason)),
     ).toBe(true);
     expect(vi.mocked(fetch)).not.toHaveBeenCalled();
+  });
+  it("keeps finalization processing until packet, report and stage files are durable", async () => {
+    const s = await create();
+    await upload(s);
+    await until(s.id, (x) => x.frames[0]?.analysis_status === "failed");
+    const packetPath = path.join(root, s.id, "claim_packet.json");
+    let releaseWrite!: () => void;
+    let notifyWriteStarted!: () => void;
+    const heldWrite = new Promise<void>((resolve) => {
+      releaseWrite = resolve;
+    });
+    const writeStarted = new Promise<void>((resolve) => {
+      notifyWriteStarted = resolve;
+    });
+    const originalWriteFile = fs.writeFile.bind(fs);
+    const writer = vi
+      .spyOn(fs, "writeFile")
+      .mockImplementation(async (...args) => {
+        if (String(args[0]) === packetPath) {
+          notifyWriteStarted();
+          await heldWrite;
+        }
+        return originalWriteFile(...args);
+      });
+    try {
+      await request(app).post(`/api/sweeps/${s.id}/finish`).expect(202);
+      await writeStarted;
+      const duringWrite = (
+        await request(app).get(`/api/sweeps/${s.id}`).expect(200)
+      ).body;
+      expect(duringWrite.status).toBe("processing");
+      expect(
+        JSON.parse(await readFile(path.join(root, s.id, "state.json"), "utf8"))
+          .status,
+      ).toBe("processing");
+    } finally {
+      releaseWrite();
+      writer.mockRestore();
+    }
+    await until(s.id, (x) => x.status === "complete");
+    expect(JSON.parse(await readFile(packetPath, "utf8")).sweep.id).toBe(s.id);
+    expect(
+      await readFile(path.join(root, s.id, "report.html"), "utf8"),
+    ).toContain("<!doctype html>");
+    expect(
+      JSON.parse(
+        await readFile(
+          path.join(root, s.id, "stages", "measurement.json"),
+          "utf8",
+        ),
+      ),
+    ).toHaveProperty("room");
+    expect(
+      JSON.parse(
+        await readFile(path.join(root, s.id, "stages", "review.json"), "utf8"),
+      ),
+    ).toHaveProperty("review_queue");
+  });
+  it("marks a failed packet export as failed without announcing a ready report", async () => {
+    const s = await create();
+    await upload(s);
+    await until(s.id, (x) => x.frames[0]?.analysis_status === "failed");
+    const packetPath = path.join(root, s.id, "claim_packet.json");
+    const originalWriteFile = fs.writeFile.bind(fs);
+    const writer = vi
+      .spyOn(fs, "writeFile")
+      .mockImplementation(async (...args) => {
+        if (String(args[0]) === packetPath)
+          throw new Error("Fixture disk unavailable");
+        return originalWriteFile(...args);
+      });
+    try {
+      await request(app).post(`/api/sweeps/${s.id}/finish`).expect(202);
+      const failed = await until(s.id, (x) => x.status === "failed");
+      expect(failed.errors).toContain(
+        "Packet export: Fixture disk unavailable",
+      );
+      expect(failed.guidance).not.toContain(
+        "Your report is ready. Review the flagged items.",
+      );
+    } finally {
+      writer.mockRestore();
+    }
   });
   it("requires calibrations to reference this sweep and rejects crossed quadrilaterals", async () => {
     const a = await create(),

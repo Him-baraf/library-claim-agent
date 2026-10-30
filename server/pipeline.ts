@@ -325,6 +325,7 @@ async function finalize(state: SweepState) {
     () => controller.abort(new Error("Finalization deadline reached")),
     config.finalizationMs,
   );
+  let finalStatus: "complete" | "failed" = "complete";
   try {
     await processing.get(state.id);
     await drainValuation(state, async () => {
@@ -342,10 +343,9 @@ async function finalize(state: SweepState) {
       state.errors.push(
         "Finalization time budget reached. Unfinished valuations are unknown and excluded.",
       );
-    state.status = "complete";
   } catch (error) {
     state.errors.push(`Finalization: ${safeError(error)}`);
-    state.status = "failed";
+    finalStatus = "failed";
   } finally {
     clearTimeout(timer);
     controllers.delete(state.id);
@@ -369,13 +369,23 @@ async function finalize(state: SweepState) {
         "Wall clock total; stage metrics inside may overlap. A complete packet may contain unresolved review items.",
     };
     state.metrics.push(finalMetric);
-    state.packet = buildPacket(state);
-    await writePacket(state);
-    finalMetric.duration_ms = Date.now() - start;
-    state.packet = buildPacket(state);
-    await writePacket(state);
+    try {
+      state.packet = buildPacket(state);
+      await writePacket(state);
+      finalMetric.duration_ms = Date.now() - start;
+      state.packet = buildPacket(state);
+      await writePacket(state);
+    } catch (error) {
+      finalStatus = "failed";
+      state.errors.push(`Packet export: ${safeError(error)}`);
+      refresh(state);
+      state.packet = buildPacket(state);
+    }
+    // A ready state must never race the JSON/report/stage files it advertises.
+    state.status = finalStatus;
     await store.save(state);
-    store.guidance(state, CAPTURE_INSTRUCTIONS.ready);
+    if (finalStatus === "complete")
+      store.guidance(state, CAPTURE_INSTRUCTIONS.ready);
   }
 }
 export async function writePacket(state: SweepState) {
