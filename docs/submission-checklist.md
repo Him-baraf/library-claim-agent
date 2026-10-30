@@ -7,7 +7,7 @@ Code cannot substitute for physical measurements or a genuine demo. Complete thi
 - [ ] Consent for space; no people/personal documents in capture.
 - [ ] Ground truth before tuning: ≥60 books, ≥2 units, ≥8 non-book items, enclosed room.
 - [ ] Every legible spine hand-read; 20 measured spines; 15 sourced/dated/condition-matched prices; tape-measured room.
-- [ ] One unedited take ≤6 minutes, voice audible, continuous sweep, live inventory, final packet/readback.
+- [ ] One unedited take ≤6 minutes, voice audible, continuous sweep, live inventory, final packet/readback. [Supplied demo recording](../demo/demo.MP4); verify these criteria before submission.
 - [ ] Same sweep JSON, readable report, saved referenced frames, sources, stages, transcript and metrics bundled.
 - [ ] Same ten eligible books in second market, blanks and FX labelled honestly.
 - [ ] Complete-run evaluation outputs, failed shelves retained; pass/fail/not-evaluated per bar.

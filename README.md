@@ -2,7 +2,9 @@
 
 Live browser voice and camera intake for a home-library contents inventory. Recognition, metric measurement, market-source retrieval, review, and packet assembly are separate stages. Unknowns stay empty; rare books and original art require appraisal; totals are computed in TypeScript.
 
-**Status:** application and evaluation tools implemented, with fixture-based automated tests. Live API and browser checks are recorded in [provider-smoke.md](docs/provider-smoke.md). No genuine demo or real-room accuracy result is claimed; the final physical benchmark needs your room. See [submission checklist](docs/submission-checklist.md).
+**Status:** application and evaluation tools implemented, with fixture-based automated tests. Live API and browser checks are recorded in [provider-smoke.md](docs/provider-smoke.md). Real-room accuracy results remain unverified. See [submission checklist](docs/submission-checklist.md).
+
+**Demo:** [Download the supplied demo recording](demo/demo.MP4). The original video is included without editing or recompression.
 
 ## Run in under 15 minutes
 
