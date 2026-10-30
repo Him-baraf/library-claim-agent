@@ -12,6 +12,7 @@ import {
 } from "./recorder";
 import "./styles.css";
 import { assessPixels } from "./quality";
+import { createCameraPreview, type CameraPreview } from "./camera-preview";
 import { subscribeToSweep } from "./live-state";
 import { browserCaptureAccessIssue, mediaRequestError } from "./media-access";
 
@@ -590,6 +591,9 @@ function App() {
   const [tab, setTab] = useState<Tab>("inventory");
   const [capturing, setCapturing] = useState(false);
   const [hasMedia, setHasMedia] = useState(false);
+  const [cameraPreviewState, setCameraPreviewState] = useState<
+    "off" | "waiting" | "playing" | "needs_tap"
+  >("off");
   const [shelf, setShelf] = useState("Shelf 1");
   const shelfRef = useRef("Shelf 1");
   const [shelfDraft, setShelfDraft] = useState("Shelf 1");
@@ -613,6 +617,8 @@ function App() {
   const [compare, setCompare] = useState({ country: "US", currency: "USD" });
   const video = useRef<HTMLVideoElement>(null);
   const media = useRef<MediaStream | null>(null);
+  const openingMedia = useRef<Promise<void> | null>(null);
+  const cameraPreview = useRef<CameraPreview | null>(null);
   const voice = useRef<VoiceSession | null>(null);
   const recorder = useRef<DemoRecorder | null>(null);
   const preparedRecordingAudio = useRef<PreparedRecordingAudio | null>(null);
@@ -643,6 +649,15 @@ function App() {
     sweepRef.current = state;
     setSweep(state);
   }, []);
+  if (!cameraPreview.current)
+    cameraPreview.current = createCameraPreview({
+      state: setCameraPreviewState,
+      error: addError,
+    });
+  const bindCameraPreview = useCallback((element: HTMLVideoElement | null) => {
+    video.current = element;
+    cameraPreview.current?.setElement(element);
+  }, []);
   const chooseShelf = useCallback((id: string) => {
     const value = id.trim().slice(0, 80);
     if (!value) return;
@@ -671,16 +686,9 @@ function App() {
       media.current?.getTracks().forEach((track) => track.stop());
       recorder.current?.cleanup();
       preparedRecordingAudio.current?.cleanup();
+      cameraPreview.current?.dispose();
     };
   }, []);
-  useEffect(() => {
-    if (video.current && media.current) {
-      video.current.srcObject = media.current;
-      void video.current
-        .play()
-        .catch((cause) => addError(`Camera playback: ${messageOf(cause)}`));
-    }
-  }, [hasMedia, sweep?.id]);
   useEffect(() => {
     if (!sweep?.id) return;
     return subscribeToSweep(sweep.id, {
@@ -802,29 +810,45 @@ function App() {
     });
   }
   async function openMedia() {
-    const issue = browserCaptureAccessIssue();
-    if (issue) throw new Error(issue.message);
-    media.current?.getTracks().forEach((track) => track.stop());
-    try {
-      media.current = await navigator.mediaDevices.getUserMedia({
-        video: {
-          facingMode: { ideal: "environment" },
-          width: { ideal: 1920 },
-          height: { ideal: 1080 },
-        },
-        audio: {
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
-        },
-      });
-    } catch (error) {
-      throw new Error(mediaRequestError(error));
+    const current = media.current;
+    if (
+      current?.getVideoTracks().some((track) => track.readyState === "live") &&
+      current.getAudioTracks().some((track) => track.readyState === "live")
+    ) {
+      cameraPreview.current?.setStream(current);
+      setHasMedia(true);
+      return;
     }
-    setHasMedia(true);
-    if (video.current) {
-      video.current.srcObject = media.current;
-      await video.current.play();
+    if (openingMedia.current) return openingMedia.current;
+    const work = (async () => {
+      const issue = browserCaptureAccessIssue();
+      if (issue) throw new Error(issue.message);
+      media.current?.getTracks().forEach((track) => track.stop());
+      cameraPreview.current?.setStream(null);
+      try {
+        media.current = await navigator.mediaDevices.getUserMedia({
+          video: {
+            facingMode: { ideal: "environment" },
+            width: { ideal: 1920 },
+            height: { ideal: 1080 },
+          },
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl: true,
+          },
+        });
+      } catch (error) {
+        throw new Error(mediaRequestError(error));
+      }
+      cameraPreview.current?.setStream(media.current);
+      setHasMedia(true);
+    })();
+    openingMedia.current = work;
+    try {
+      await work;
+    } finally {
+      if (openingMedia.current === work) openingMedia.current = null;
     }
   }
   async function begin(event?: React.FormEvent, manual = false) {
@@ -877,18 +901,13 @@ function App() {
       setRecordingFile(null);
       setCaption("");
       captionRef.current = "";
-      if (
-        !manual &&
-        recordEnabled &&
-        video.current &&
-        media.current &&
-        preparedAudio
-      ) {
+      if (!manual && recordEnabled && media.current && preparedAudio) {
         try {
+          const preview = await cameraPreview.current!.whenPlaying(10000);
           if (preparedAudio.context.state !== "running")
             await preparedAudio.ready;
           recorder.current = startDemoRecorder(
-            video.current,
+            preview,
             media.current,
             () => ({
               sweep: sweepRef.current,
@@ -929,6 +948,7 @@ function App() {
       addError(messageOf(cause));
       if (!sweepRef.current) {
         media.current?.getTracks().forEach((track) => track.stop());
+        cameraPreview.current?.setStream(null);
         setHasMedia(false);
       }
     } finally {
@@ -950,6 +970,8 @@ function App() {
       state.status !== "capturing" ||
       !element ||
       element.readyState < 2 ||
+      element.paused ||
+      element.ended ||
       !element.videoWidth
     )
       return;
@@ -1576,7 +1598,7 @@ function App() {
               <section className="panel capture-panel">
                 <div className="camera">
                   <video
-                    ref={video}
+                    ref={bindCameraPreview}
                     autoPlay
                     playsInline
                     muted
@@ -1615,6 +1637,30 @@ function App() {
                   </div>
                 </div>
                 <div className="capture-controls">
+                  {hasMedia && cameraPreviewState !== "playing" && (
+                    <div className="notice" role="status">
+                      <strong>
+                        {cameraPreviewState === "waiting"
+                          ? "Starting camera preview…"
+                          : "Camera preview needs a tap"}
+                      </strong>
+                      <p>
+                        Your camera stream is connected. Tap below to let Safari
+                        play the preview.
+                      </p>
+                      <button
+                        type="button"
+                        className="secondary"
+                        onClick={() => {
+                          void cameraPreview.current
+                            ?.resume()
+                            .catch((cause) => addError(messageOf(cause)));
+                        }}
+                      >
+                        Resume camera preview
+                      </button>
+                    </div>
+                  )}
                   {!hasMedia && sweep.status === "capturing" && (
                     <div className="notice">
                       <label>
@@ -2260,6 +2306,7 @@ function App() {
                   voice.current = null;
                   media.current?.getTracks().forEach((track) => track.stop());
                   media.current = null;
+                  cameraPreview.current?.setStream(null);
                   setHasMedia(false);
                   update(null);
                   setCaption("");
@@ -2291,14 +2338,6 @@ function App() {
             </div>
           </>
         )}
-        <video
-          ref={!sweep ? video : undefined}
-          className="setup-video"
-          autoPlay
-          muted
-          playsInline
-          aria-hidden="true"
-        />
       </main>
       <footer>
         Library Claim Agent · model output is evidence to review ·{" "}
