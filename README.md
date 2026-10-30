@@ -4,7 +4,11 @@ Live browser voice and camera intake for a home-library contents inventory. Reco
 
 **Status:** application and evaluation tools implemented, with fixture-based automated tests. Live API and browser checks are recorded in [provider-smoke.md](docs/provider-smoke.md). Real-room accuracy results remain unverified. See [submission checklist](docs/submission-checklist.md).
 
-**Demo:** [Download the supplied demo recording](demo/demo.MP4). The original video is included without editing or recompression.
+## Demo
+
+https://github.com/user-attachments/assets/be83a6e1-747c-407d-a565-9967bd2e99d1
+
+[Download the original demo recording](demo/demo.MP4). The video is included without editing or recompression.
 
 ## Run in under 15 minutes
 
